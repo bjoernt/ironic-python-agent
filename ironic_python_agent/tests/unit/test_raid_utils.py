@@ -377,6 +377,46 @@ class TestRaidUtils(base.IronicAgentTest):
     @mock.patch.object(disk_utils, 'trigger_device_rescan', autospec=True)
     @mock.patch.object(raid_utils, 'get_next_free_raid_device', autospec=True,
                        return_value='/dev/md42')
+
+    @mock.patch.object(hardware, 'dispatch_to_managers', autospec=True)
+    @mock.patch.object(utils, 'execute', autospec=True)
+    @mock.patch.object(disk_utils, 'find_efi_partition', autospec=True)
+    def test_prepare_boot_partitions_for_softraid_uefi_gpt_esp_too_large(
+            self, mock_efi_part, mock_execute, mock_dispatch,
+            mock_free_raid_device, mock_rescan, mock_find_esp):
+        """ESP content larger than md device raises SoftwareRAIDError."""
+        mock_efi_part.return_value = {'number': '12'}
+        md_size = 576651264   # 550 MiB - 64KiB
+        esp_used = 629145600  # 600 MiB — larger than md_size
+        esp_uuid = '0B8C-37B6'
+        mock_execute.side_effect = [
+            ('451', None),           # sgdisk -F
+            (None, None),            # sgdisk create part
+            (None, None),            # partprobe
+            (None, None),            # blkid
+            ('/dev/sda12: dsfkgsdjfg', None),  # blkid
+            ('452', None),           # sgdisk -F
+            (None, None),            # sgdisk create part
+            (None, None),            # partprobe
+            (None, None),            # blkid
+            ('/dev/sdb14: whatever', None),    # blkid
+            (None, None),            # mdadm
+            ('%d\n' % md_size, None),  # blockdev --getsize64
+            ('%s\n' % esp_uuid, None),  # blkid UUID
+            (None, None),            # mount efi_part
+            ('%d\t/tmp/fake_src\n' % esp_used, None),  # du -sb src_mnt
+            (None, None),            # umount src (cleanup on error)
+        ]
+        mock_find_esp.return_value = None
+
+        with mock.patch('tempfile.mkdtemp', autospec=True,
+                        return_value='/tmp/fake_src'):
+            self.assertRaises(
+                errors.SoftwareRAIDError,
+                raid_utils.prepare_boot_partitions_for_softraid,
+                '/dev/md0', ['/dev/sda', '/dev/sdb'], None,
+                target_boot_mode='uefi')
+
     @mock.patch.object(hardware, 'dispatch_to_managers', autospec=True)
     @mock.patch.object(utils, 'execute', autospec=True)
     @mock.patch.object(disk_utils, 'find_efi_partition', autospec=True)
