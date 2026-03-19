@@ -73,7 +73,190 @@ def execute(*cmd, **kwargs):
 
     Executes and logs results from a system command.
     """
-    return ironic_utils.execute(*cmd, **kwargs)
+    if use_standard_locale:
+        env = kwargs.pop('env_variables', os.environ.copy())
+        env['LC_ALL'] = 'C'
+        kwargs['env_variables'] = env
+
+    if kwargs.pop('run_as_root', False):
+        warnings.warn("run_as_root is deprecated and has no effect",
+                      DeprecationWarning)
+
+    def _log(stdout, stderr):
+        if log_stdout:
+            try:
+                LOG.debug('Command stdout is: "%s"', stdout)
+            except UnicodeEncodeError:
+                LOG.debug('stdout contains invalid UTF-8 characters')
+                stdout = (stdout.encode('utf8', 'surrogateescape')
+                          .decode('utf8', 'ignore'))
+                LOG.debug('Command stdout is: "%s"', stdout)
+        try:
+            LOG.debug('Command stderr is: "%s"', stderr)
+        except UnicodeEncodeError:
+            LOG.debug('stderr contains invalid UTF-8 characters')
+            stderr = (stderr.encode('utf8', 'surrogateescape')
+                      .decode('utf8', 'ignore'))
+            LOG.debug('Command stderr is: "%s"', stderr)
+
+    try:
+        result = processutils.execute(*cmd, **kwargs)
+    except FileNotFoundError:
+        with excutils.save_and_reraise_exception():
+            LOG.debug('Command not found: "%s"', ' '.join(map(str, cmd)))
+    except processutils.ProcessExecutionError as exc:
+        with excutils.save_and_reraise_exception():
+            _log(exc.stdout, exc.stderr)
+    else:
+        _log(result[0], result[1])
+        return result
+
+
+def mkfs(fs, path, label=None, uuid=None):
+    """Format a file or block device
+
+    :param fs: Filesystem type (examples include 'swap', 'ext3', 'ext4'
+               'btrfs', etc.)
+    :param path: Path to file or block device to format
+    :param label: Volume label to use
+    :param uuid: UUID to assign to the new filesystem
+    """
+    if fs == 'swap':
+        args = ['mkswap']
+    else:
+        args = ['mkfs', '-t', fs]
+    # add -F to force no interactive execute on non-block device.
+    if fs in ('ext3', 'ext4'):
+        args.extend(['-F'])
+    if label:
+        if fs in ('msdos', 'vfat'):
+            label_opt = '-n'
+        else:
+            label_opt = '-L'
+        args.extend([label_opt, label])
+    if uuid:
+        if fs in ('msdos', 'vfat'):
+            args.extend(['-i', uuid])
+        else:
+            args.extend(['-U', uuid])
+    args.append(path)
+    try:
+        execute(*args, use_standard_locale=True)
+    except processutils.ProcessExecutionError as e:
+        with excutils.save_and_reraise_exception() as ctx:
+            if os.strerror(errno.ENOENT) in e.stderr:
+                ctx.reraise = False
+                LOG.exception('Failed to make file system. '
+                              'File system %s is not supported.', fs)
+                raise errors.FileSystemNotSupported(fs=fs)
+            else:
+                LOG.exception('Failed to create a file system '
+                              'in %(path)s. Error: %(error)s',
+                              {'path': path, 'error': e})
+
+
+def try_execute(*cmd, **kwargs):
+    """The same as execute but returns None on error.
+
+    Executes and logs results from a system command. See docs for
+    oslo_concurrency.processutils.execute for usage.
+
+    Instead of raising an exception on failure, this method simply
+    returns None in case of failure.
+
+    :param cmd: positional arguments to pass to processutils.execute()
+    :param kwargs: keyword arguments to pass to processutils.execute()
+    :raises: UnknownArgumentError on receiving unknown arguments
+    :returns: tuple of (stdout, stderr) or None in some error cases
+    """
+    try:
+        return execute(*cmd, **kwargs)
+    except (processutils.ProcessExecutionError, OSError) as e:
+        LOG.debug('Command failed: %s', e)
+
+
+def parse_device_tags(output):
+    """Parse tags from the lsblk/blkid output.
+
+    Parses format KEY="VALUE" KEY2="VALUE2".
+
+    :return: a generator yielding dicts with information from each line.
+    """
+    for line in output.strip().split('\n'):
+        if line.strip():
+            try:
+                yield {key: value for key, value in
+                       (v.split('=', 1) for v in shlex.split(line))}
+            except ValueError as err:
+                raise ValueError(
+                    ("Malformed blkid/lsblk output line '%(line)s': %(err)s")
+                    % {'line': line, 'err': err})
+
+
+@contextlib.contextmanager
+def mounted(source, dest=None, opts=None, fs_type=None,
+            mount_attempts=1, umount_attempts=3):
+    """A context manager for a temporary mount.
+
+    :param source: A device to mount.
+    :param dest: Mount destination. If not specified, a temporary directory
+        will be created and removed afterwards. An existing destination is
+        not removed.
+    :param opts: Mount options (``-o`` argument).
+    :param fs_type: File system type (``-t`` argument).
+    :param mount_attempts: A number of attempts to mount the device.
+    :param umount_attempts: A number of attempts to unmount the device.
+    :returns: A generator yielding the destination.
+    """
+    params = []
+    if opts:
+        params.extend(['-o', ','.join(opts)])
+    if fs_type:
+        params.extend(['-t', fs_type])
+
+    if dest is None:
+        dest = tempfile.mkdtemp()
+        clean_up = True
+    else:
+        clean_up = False
+
+    mounted = False
+    try:
+        execute("mount", source, dest, *params,
+                attempts=mount_attempts, delay_on_retry=True)
+        mounted = True
+        yield dest
+    finally:
+        if mounted:
+            try:
+                execute("umount", dest, attempts=umount_attempts,
+                        delay_on_retry=True)
+            except (EnvironmentError,
+                    processutils.ProcessExecutionError) as exc:
+                LOG.warning(
+                    'Unable to unmount temporary location %(dest)s: %(err)s',
+                    {'dest': dest, 'err': exc})
+                # NOTE(dtantsur): don't try to remove a still mounted location
+                clean_up = False
+
+        if clean_up:
+            try:
+                shutil.rmtree(dest)
+            except EnvironmentError as exc:
+                LOG.warning(
+                    'Unable to remove temporary location %(dest)s: %(err)s',
+                    {'dest': dest, 'err': exc})
+
+
+def unlink_without_raise(path):
+    try:
+        os.unlink(path)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return
+        else:
+            LOG.warning("Failed to unlink %s, error: %s", path, e)
+>>>>>>> 83d552e1 (Fix ESP relocation to RAID device using filesystem copy)
 
 
 def _read_params_from_file(filepath):
