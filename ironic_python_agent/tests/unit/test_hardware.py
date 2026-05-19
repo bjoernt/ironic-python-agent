@@ -3388,6 +3388,244 @@ class TestGenericHardwareManager(base.IronicAgentTest):
         mocked_create.assert_called_once_with(self.hardware, self.node, [],
                                               raid_config)
 
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__handle_raid_skip_list_partial_skip_list(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        raid_device2 = hardware.BlockDevice('/dev/md1', 'RAID-0',
+                                            2147483648, True)
+        raid_devices = [raid_device1, raid_device2]
+        skip_list = ['data']
+        mocked_get_holder_disks.side_effect = [
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"]
+        ]
+        mocked_get_volume_name.side_effect = [
+            "root", "data"
+        ]
+        raid_skip_list_dict = self.hardware._handle_raid_skip_list(
+            raid_devices, skip_list)
+        delete_raid_devices = raid_skip_list_dict['delete_raid_devices']
+        volume_name_of_raid_devices = raid_skip_list_dict[
+            'volume_name_of_raid_devices']
+        cause_of_not_deleting = raid_skip_list_dict['cause_of_not_deleting']
+        self.assertEqual(delete_raid_devices,
+                         {'/dev/md0': 'wipe', '/dev/md1': 'keep'})
+        self.assertEqual(volume_name_of_raid_devices,
+                         {'/dev/md0': 'root', '/dev/md1': 'data'})
+        self.assertEqual(cause_of_not_deleting,
+                         {'/dev/md0': 'data'})
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__handle_raid_skip_list_complete_skip_list(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        raid_device2 = hardware.BlockDevice('/dev/md1', 'RAID-0',
+                                            2147483648, True)
+        raid_devices = [raid_device1, raid_device2]
+        skip_list = ['data1', 'data2']
+        mocked_get_holder_disks.side_effect = [
+            ['/dev/sda', '/dev/sdb'],
+            ['/dev/sda', '/dev/sdb'],
+            ['/dev/sda', '/dev/sdb'],
+            ['/dev/sda', '/dev/sdb']
+        ]
+        mocked_get_volume_name.side_effect = [
+            'data1', 'data2'
+        ]
+        raid_skip_list_dict = self.hardware._handle_raid_skip_list(
+            raid_devices, skip_list)
+        delete_raid_devices = raid_skip_list_dict['delete_raid_devices']
+        volume_name_of_raid_devices = raid_skip_list_dict[
+            'volume_name_of_raid_devices']
+        cause_of_not_deleting = raid_skip_list_dict['cause_of_not_deleting']
+        self.assertEqual(delete_raid_devices,
+                         {'/dev/md0': 'keep', '/dev/md1': 'keep'})
+        self.assertEqual(volume_name_of_raid_devices,
+                         {'/dev/md0': 'data1', '/dev/md1': 'data2'})
+        # When evaluating /dev/md0, it is marked as the cause
+        self.assertEqual(cause_of_not_deleting, {'/dev/md1': 'data1'})
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__handle_raid_skip_list_partial_skip_list_with_efi(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        raid_device2 = hardware.BlockDevice('/dev/md1', 'RAID-0',
+                                            2147483648, True)
+        raid_device3 = hardware.BlockDevice('/dev/md2', 'RAID-1',
+                                            536870912, True)
+        raid_devices = [raid_device1, raid_device2, raid_device3]
+        skip_list = ['data']
+        mocked_get_holder_disks.side_effect = [
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+        ]
+        mocked_get_volume_name.side_effect = [
+            "root",  # md0
+            "data",  # md1
+            "esp",   # md2
+        ]
+        raid_skip_list_dict = self.hardware._handle_raid_skip_list(
+            raid_devices, skip_list)
+        delete_raid_devices = raid_skip_list_dict['delete_raid_devices']
+        expected_delete_raid_devices = {'/dev/md0': 'wipe',
+                                        '/dev/md1': 'keep',
+                                        '/dev/md2': 'keep'}
+        self.assertEqual(delete_raid_devices, expected_delete_raid_devices)
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__handle_raid_skip_list_partial_skip_list_with_efi_test_order(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        raid_device2 = hardware.BlockDevice('/dev/md1', 'RAID-0',
+                                            2147483648, True)
+        raid_device3 = hardware.BlockDevice('/dev/md2', 'RAID-1',
+                                            536870912, True)
+        raid_devices = [raid_device3, raid_device1, raid_device2]
+        skip_list = ['data']
+        mocked_get_holder_disks.side_effect = [
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+            ["/dev/sda", "/dev/sdb"],
+        ]
+        mocked_get_volume_name.side_effect = [
+            "esp",   # md2 is ESP, comes first
+            "root",  # md0 comes second
+            "data",  # md1 comes last
+        ]
+        raid_skip_list_dict = self.hardware._handle_raid_skip_list(
+            raid_devices, skip_list)
+        delete_raid_devices = raid_skip_list_dict['delete_raid_devices']
+        expected_delete_raid_devices = {'/dev/md0': 'wipe',
+                                        '/dev/md1': 'keep',
+                                        '/dev/md2': 'keep'}
+        self.assertEqual(delete_raid_devices, expected_delete_raid_devices)
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__analyze_raid_device_device_on_skip_list(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        skip_list = ['data1', 'data2']
+        mocked_get_holder_disks.side_effect = [
+            ['/dev/sda', '/dev/sdb']
+        ]
+        mocked_get_volume_name.return_value = 'data1'
+        volume_name_of_raid_devices = {}
+        raid_devices_on_holder_disks = {}
+        volume_name_on_skip_list = {}
+        esp_part = self.hardware._analyze_raid_device(
+            raid_device1, skip_list,
+            raid_devices_on_holder_disks,
+            volume_name_on_skip_list,
+            volume_name_of_raid_devices)
+        self.assertIsNone(esp_part)
+        self.assertEqual(volume_name_of_raid_devices,
+                         {'/dev/md0': 'data1'})
+        self.assertEqual(raid_devices_on_holder_disks,
+                         {'/dev/sda': ['/dev/md0'], '/dev/sdb': ['/dev/md0']})
+        self.assertEqual(volume_name_on_skip_list,
+                         {'/dev/md0': True})
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__analyze_raid_device_efi_device(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        skip_list = ['data1', 'data2']
+        mocked_get_holder_disks.side_effect = [
+            ['/dev/sda', '/dev/sdb']
+        ]
+        mocked_get_volume_name.return_value = 'esp'
+        volume_name_of_raid_devices = {}
+        raid_devices_on_holder_disks = {}
+        volume_name_on_skip_list = {}
+        esp_part = self.hardware._analyze_raid_device(
+            raid_device1, skip_list,
+            raid_devices_on_holder_disks,
+            volume_name_on_skip_list,
+            volume_name_of_raid_devices)
+        self.assertEqual(esp_part, raid_device1.name)
+        self.assertEqual(volume_name_of_raid_devices,
+                         {'/dev/md0': 'esp'})
+        self.assertEqual(raid_devices_on_holder_disks,
+                         {'/dev/sda': ['/dev/md0'], '/dev/sdb': ['/dev/md0']})
+        self.assertEqual(volume_name_on_skip_list,
+                         {'/dev/md0': False})
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__analyze_raid_device_device_not_on_skip_list(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        raid_device1 = hardware.BlockDevice('/dev/md0', 'RAID-1',
+                                            107374182400, True)
+        skip_list = ['data1', 'data2']
+        mocked_get_holder_disks.side_effect = [
+            ['/dev/sda', '/dev/sdb']
+        ]
+        mocked_get_volume_name.return_value = 'root'
+        volume_name_of_raid_devices = {}
+        raid_devices_on_holder_disks = {}
+        volume_name_on_skip_list = {}
+        esp_part = self.hardware._analyze_raid_device(
+            raid_device1, skip_list,
+            raid_devices_on_holder_disks,
+            volume_name_on_skip_list,
+            volume_name_of_raid_devices)
+        self.assertIsNone(esp_part)
+        self.assertEqual(volume_name_of_raid_devices,
+                         {'/dev/md0': 'root'})
+        self.assertEqual(raid_devices_on_holder_disks,
+                         {'/dev/sda': ['/dev/md0'], '/dev/sdb': ['/dev/md0']})
+        self.assertEqual(volume_name_on_skip_list,
+                         {'/dev/md0': False})
+
+    @mock.patch.object(raid_utils, 'get_volume_name_of_raid_device',
+                       autospec=True)
+    @mock.patch.object(hardware, 'get_holder_disks', autospec=True)
+    def test__handle_raids_with_volume_name_on_skip_list(
+            self, mocked_get_holder_disks, mocked_get_volume_name):
+        hardware.BlockDevice('/dev/md0', 'RAID-1',
+                             107374182400, True)
+        raid_device2 = hardware.BlockDevice('/dev/md1', 'RAID-0',
+                                            2147483648, True)
+        mocked_get_holder_disks.side_effect = [
+            ['/dev/sda', '/dev/sdb']
+        ]
+        cause_of_not_deleting = {}
+        delete_raid_devices = {'/dev/md0': 'delete', '/dev/md1': 'delete'}
+        raid_devices_on_holder_disks = {'/dev/sda': ['/dev/md0', '/dev/md1'],
+                                        '/dev/sdb': ['/dev/md0', '/dev/md1']}
+        volume_name_of_raid_devices = \
+            {'/dev/md0': 'root', '/dev/md1': 'data'}
+        mocked_get_volume_name.return_value = 'data'
+        self.hardware._handle_raids_with_volume_name_on_skip_list(
+            raid_device2.name, delete_raid_devices,
+            cause_of_not_deleting, raid_devices_on_holder_disks,
+            volume_name_of_raid_devices)
+        self.assertEqual(cause_of_not_deleting, {'/dev/md0': 'data'})
+
     @mock.patch.object(raid_utils, '_get_actual_component_devices',
                        autospec=True)
     @mock.patch.object(disk_utils, 'list_partitions', autospec=True)

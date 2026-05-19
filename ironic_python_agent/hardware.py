@@ -2363,6 +2363,129 @@ class GenericHardwareManager(HardwareManager):
             self.delete_configuration(node, ports)
         return self._do_create_configuration(node, ports, raid_config)
 
+    def _handle_raid_skip_list(self, raid_devices, skip_list):
+        '''Handle the RAID skip list
+
+        This function analyzes the existing RAID devices and the provided
+        skip list to determine which RAID devices should be deleted, wiped,
+        or kept.
+
+        :param raid_devices: A list of BlockDevice objects representing
+                             existing RAID devices
+        :param skip_list: A list of volume names to skip
+        :returns: A dictionary with three keys:
+                    - 'delete_raid_devices': A dictionary mapping RAID device
+                       names to actions ('delete', 'wipe', 'keep')
+                    - 'volume_name_of_raid_devices': A dictionary mapping
+                       RAID device names to their volume names
+                    - 'cause_of_not_deleting': A dictionary mapping RAID
+                       device names to the volume names of RAID devices
+                       that caused them to be kept
+        '''
+        # NOTE(kubajj):
+        # Options in the dictionary delete_raid_devices:
+        # 1. Delete both superblock and data - delete
+        # 2. Keep superblock and wipe data - wipe
+        # 3. Do not touch RAID array - keep
+        delete_raid_devices = {}
+
+        volume_name_of_raid_devices = {}
+        cause_of_not_deleting = {}
+
+        raid_devices_on_holder_disks = {}
+        volume_name_on_skip_list = {}
+        esp_part = None
+        for raid_device in raid_devices:
+            delete_raid_devices[raid_device.name] = 'delete'
+            esp_part_candidate = self._analyze_raid_device(
+                raid_device, skip_list, raid_devices_on_holder_disks,
+                volume_name_on_skip_list, volume_name_of_raid_devices)
+            if esp_part_candidate is not None:
+                esp_part = esp_part_candidate
+        for raid_device in raid_devices:
+            if volume_name_on_skip_list.get(raid_device.name):
+                self._handle_raids_with_volume_name_on_skip_list(
+                    raid_device.name, delete_raid_devices,
+                    cause_of_not_deleting, raid_devices_on_holder_disks,
+                    volume_name_of_raid_devices)
+        # NOTE(kubajj): If ESP partition was supposed to be wiped,
+        # we keep it so that it can be found by raid_utils.find_esp_raid
+        if esp_part is not None and \
+                delete_raid_devices.get(esp_part) == 'wipe':
+            delete_raid_devices[esp_part] = 'keep'
+        return {'delete_raid_devices': delete_raid_devices,
+                'volume_name_of_raid_devices': volume_name_of_raid_devices,
+                'cause_of_not_deleting': cause_of_not_deleting}
+
+    def _analyze_raid_device(self, raid_device, skip_list,
+                             raid_devices_on_holder_disks,
+                             volume_name_on_skip_list,
+                             volume_name_of_raid_devices):
+        '''Analyze a RAID device
+
+        This function figures out which holder disks a RAID device is on,
+        checks if its volume name is on the skip list, and checks whether
+        it is an ESP partition - in which case it returns its name.
+        It also updates the provided dictionaries with information about
+        the RAID device.
+
+        :param raid_device: A BlockDevice object representing a RAID device
+        :param skip_list: A list of volume names to skip
+        :param raid_devices_on_holder_disks: A dictionary mapping holder disks
+                to lists of RAID devices on them
+        :param volume_name_on_skip_list: A dictionary mapping RAID device names
+                to booleans indicating whether their volume name is on the skip
+                list
+        :param volume_name_of_raid_devices: A dictionary mapping RAID device
+                names to their volume names
+        :returns: The name of the ESP partition if the RAID device is an ESP
+                  partition, None otherwise
+        '''
+        esp_part = None
+        holder_disks = get_holder_disks(raid_device.name)
+        for holder_disk in holder_disks:
+            if raid_devices_on_holder_disks.get(holder_disk):
+                raid_devices_on_holder_disks.get(holder_disk).append(
+                    raid_device.name)
+            else:
+                raid_devices_on_holder_disks[holder_disk] = [
+                    raid_device.name]
+        volume_name = raid_utils.get_volume_name_of_raid_device(
+            raid_device.name)
+        if volume_name == 'esp':
+            esp_part = raid_device.name
+        volume_name_of_raid_devices[raid_device.name] = volume_name
+        if volume_name:
+            LOG.info("Software RAID device %(dev)s has volume name "
+                     "%(name)s", {'dev': raid_device.name,
+                                  'name': volume_name})
+            if volume_name in skip_list:
+                LOG.warning("RAID device %s will not be deleted",
+                            raid_device.name)
+                volume_name_on_skip_list[raid_device.name] = True
+            else:
+                volume_name_on_skip_list[raid_device.name] = False
+        return esp_part
+
+    def _handle_raids_with_volume_name_on_skip_list(
+            self, raid_device_name, delete_raid_devices,
+            cause_of_not_deleting, raid_devices_on_holder_disks,
+            volume_name_of_raid_devices):
+        # NOTE(kubajj): Keep this raid_device
+        # wipe all other RAID arrays on these holder disks
+        # unless they have 'keep' already
+        delete_raid_devices[raid_device_name] = 'keep'
+        holder_disks = get_holder_disks(raid_device_name)
+        for holder_disk in holder_disks:
+            for neighbour_raid_device in raid_devices_on_holder_disks[
+                    holder_disk]:
+                if not neighbour_raid_device == raid_device_name and \
+                        delete_raid_devices[neighbour_raid_device] \
+                        == 'delete':
+                    delete_raid_devices[neighbour_raid_device] = 'wipe'
+                    cause_of_not_deleting[neighbour_raid_device] = \
+                        volume_name_of_raid_devices[raid_device_name]
+
     def create_configuration(self, node, ports):
         """Create a RAID configuration.
 
