@@ -256,8 +256,6 @@ def unlink_without_raise(path):
             return
         else:
             LOG.warning("Failed to unlink %s, error: %s", path, e)
->>>>>>> 83d552e1 (Fix ESP relocation to RAID device using filesystem copy)
-
 
 def _read_params_from_file(filepath):
     """Extract key=value pairs from a file.
